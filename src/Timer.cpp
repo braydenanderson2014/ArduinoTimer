@@ -1,4 +1,4 @@
-#include "SimpleArduinoTimer.h"
+#include "SuperTimers.h"
 #include <RTClib.h>
 
 RTC_DS3231 timerRTC; // Add an instance of the RTC library

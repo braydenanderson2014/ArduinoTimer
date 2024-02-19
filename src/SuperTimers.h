@@ -1,5 +1,5 @@
-#ifndef SIMPLEARDUINOTIMER_h
-#define SIMPLEARDUINOTIMER_h
+#ifndef SUPERTIMERS_h
+#define SUPERTIMERS_h
 
 #include <Arduino.h>
 #include <RTClib.h>
@@ -44,4 +44,4 @@ public:
     bool debug;
 };
 
-#endif // SIMPLEARDUINOTIMER_h
+#endif // SUPERTIMERS_h

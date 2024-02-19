@@ -1,5 +1,5 @@
 #######################################
-# Syntax Coloring Map For ArrayList
+# Syntax Coloring Map For TimerLibrary
 #######################################
 
 #######################################
