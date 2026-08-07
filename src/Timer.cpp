@@ -46,7 +46,7 @@ bool Timer::_rtcBeginImpl() {
 #endif
 }
 
-// Returns the current RTC time as milliseconds (truncated to unsigned long; wraps on 32-bit targets).
+// Returns the current RTC time as milliseconds since the Unix epoch.
 unsigned long Timer::_rtcNowMs() const {
 #ifdef RTC_CHIP_DS1302
     return (unsigned long)(rtc.GetDateTime().Unix32Time()) * 1000UL;
