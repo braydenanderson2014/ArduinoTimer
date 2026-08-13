@@ -3,7 +3,7 @@
 
 <!-- HEALTH_BADGES_START -->
 [![Health: Unsure](https://img.shields.io/badge/Health-Unsure-9e9e9e?style=flat-square)](../../reports/library-health-report.md)
-[![Testing: Tested](https://img.shields.io/badge/Testing-Tested-2ea44f?style=flat-square)](../../reports/library-health-report.md)
+[![Testing: Failed Testing](https://img.shields.io/badge/Testing-Failed%20Testing-d73a49?style=flat-square)](../../reports/library-health-report.md)
 <!-- HEALTH_BADGES_END -->
 
 The `Timer` class is a C++ class for managing time-related operations and timers. It allows you to create, start, stop, reset, and pause timers, making it useful for various timing and scheduling tasks in your Arduino projects.
@@ -226,6 +226,66 @@ Getter counterparts for the existing setters:
 ```cpp
 Serial.println("Target: " + String(myTimer.getTargetSeconds()) + "s");
 ```
+
+## Multithreading (opt-in)
+
+By default the Timer compiles exactly as before: no locking, no threads, no
+extra dependencies. Two compile-time macros enable concurrency support on
+UNO Q / GIGA (mbed) / ESP32 class targets:
+
+| Macro | Effect | Requires |
+| --- | --- | --- |
+| `TIMER_THREAD_SAFE` | Every public method is guarded by a recursive `Mutex`, so one Timer instance can be shared by several threads. | `SimpleMutex` |
+| `TIMER_LOCK_BACKEND_RWLOCK` | Uses `SimpleRWLock` instead of `Mutex`: read-only methods (`elapsed()`, `remainingTimeMillis()`, `isTimerRunning()`, the getters...) take a shared read lock so several threads can poll concurrently, while mutators take an exclusive write lock. Implies `TIMER_THREAD_SAFE`. | `SimpleRWLock` |
+| `TIMER_ENABLE_THREADING` | Implies `TIMER_THREAD_SAFE` and adds `startMonitor()` / `stopMonitor()`, which poll `hasReachedTarget()` on a background thread. | `SimpleMutex` (or `SimpleRWLock`), `SimpleThreadManager` |
+
+Both lock backends are reentrant, so nested internal calls (for example
+`hasReachedTarget()` → `elapsed()` → `restart()`) never self-deadlock.
+
+Optional tuning macros: `TIMER_MONITOR_INTERVAL_MS` (default `10`) and
+`TIMER_MONITOR_STACK_SIZE` (default `2048`).
+
+```ini
+; platformio.ini
+build_flags =
+    -D TIMER_ENABLE_THREADING
+    -D TIMER_LOCK_BACKEND_RWLOCK   ; optional: read-heavy workloads
+lib_deps =
+    SimpleRWLock                   ; or SimpleMutex for the default backend
+    SimpleThreadManager
+```
+
+```cpp
+#include <SimpleArduinoTimer.h>
+
+Timer myTimer;
+
+void onDone() { Serial.println("Target reached"); }
+
+void setup() {
+    myTimer.onTargetReached(onDone);
+    myTimer.setRepeating(true);
+    myTimer.setTargetSeconds(5);
+    myTimer.start();
+
+#ifdef TIMER_ENABLE_THREADING
+    myTimer.startMonitor();   // callback now fires without loop() polling
+#endif
+}
+```
+
+Additional API when the macros are enabled:
+
+- `Timer::isThreadSafe()` — always available; reports how the library was built.
+- `lock(timeoutMs)` / `unlock()` — exclusive; group several calls into one atomic block.
+- `lockShared(timeoutMs)` / `unlockShared()` — shared read acquisition on the
+  RWLock backend, identical to `lock()` / `unlock()` on the Mutex backend.
+- `startMonitor(pollIntervalMs)` / `stopMonitor(timeoutMs)` / `isMonitorRunning()`.
+
+`startMonitor()` returns `false` when the target has no RTOS threading, so the
+sketch can fall back to polling `hasReachedTarget()` from `loop()`. The target
+callback runs while the Timer lock is held; calling back into the same Timer is
+safe (the mutex is recursive), but avoid blocking on other locks inside it.
 
 ## Installation
 

@@ -4,6 +4,52 @@
 #include <Arduino.h>
 
 // ---------------------------------------------------------------------------
+// Concurrency macros (opt-in)
+// ---------------------------------------------------------------------------
+// By default Timer is compiled exactly as before: no locking, no threads and
+// no extra dependencies.  These compile-time switches change that:
+//
+//   TIMER_THREAD_SAFE       — guard every public method with a lock so a Timer
+//                             instance can be shared between threads/cores.
+//                             Default backend is the recursive Mutex from
+//                             SimpleMutex.
+//   TIMER_LOCK_BACKEND_RWLOCK — use SimpleRWLock instead of Mutex.  Read-only
+//                             methods take a shared read lock so several
+//                             threads can poll the Timer concurrently, while
+//                             mutators take an exclusive write lock.  Implies
+//                             TIMER_THREAD_SAFE.
+//   TIMER_ENABLE_THREADING  — implies TIMER_THREAD_SAFE and adds
+//                             startMonitor()/stopMonitor(), which poll the
+//                             Timer on a background thread
+//                             (SimpleThreadManager).
+//
+// All switches require the UNO Q / GIGA / ESP32 class concurrency libraries
+// (SimpleMutex or SimpleRWLock, plus SimpleThreadManager) on the include path.
+// ---------------------------------------------------------------------------
+#if (defined(TIMER_ENABLE_THREADING) || defined(TIMER_LOCK_BACKEND_RWLOCK)) && \
+    !defined(TIMER_THREAD_SAFE)
+#  define TIMER_THREAD_SAFE 1
+#endif
+
+#ifdef TIMER_THREAD_SAFE
+#  ifdef TIMER_LOCK_BACKEND_RWLOCK
+#    include <SimpleRWLock.h>
+#  else
+#    include <Mutex.h>
+#  endif
+#endif
+
+#ifdef TIMER_ENABLE_THREADING
+#  include <ThreadManager.h>
+#  ifndef TIMER_MONITOR_STACK_SIZE
+#    define TIMER_MONITOR_STACK_SIZE 2048
+#  endif
+#  ifndef TIMER_MONITOR_INTERVAL_MS
+#    define TIMER_MONITOR_INTERVAL_MS 10
+#  endif
+#endif
+
+// ---------------------------------------------------------------------------
 // RTC chip-selection macros
 // ---------------------------------------------------------------------------
 // Define useRTCModule to enable RTC support, then define ONE of the
@@ -86,6 +132,24 @@ private:
     mode timerMode;
     String TimerName;
 
+#ifdef TIMER_THREAD_SAFE
+#  ifdef TIMER_LOCK_BACKEND_RWLOCK
+    mutable SimpleRWLock _rwLock;
+#  else
+    mutable Mutex _mutex;   // recursive, so nested public calls are safe
+#  endif
+#endif
+
+#ifdef TIMER_ENABLE_THREADING
+    ThreadManager::ThreadId _monitorThread;
+    volatile bool _monitorRunning;
+    volatile bool _monitorStopRequested;
+    unsigned long _monitorIntervalMs;
+
+    static void _monitorEntry(void* argument);
+    void _monitorLoop();
+#endif
+
 #ifdef useRTCModule
     int _timezoneOffsetHours;
 
@@ -106,6 +170,7 @@ private:
 
 public:
     Timer(bool debug = false);
+    ~Timer();
     void setTimerName(String timerName);
     String getTimerName() const;
 
@@ -158,6 +223,26 @@ public:
 
     // Callback
     void onTargetReached(void (*callback)());
+
+    // Concurrency helpers
+    static bool isThreadSafe();
+
+#ifdef TIMER_THREAD_SAFE
+    // Manual locking for callers that need several operations to be atomic.
+    bool lock(unsigned long timeoutMs = 0);
+    void unlock();
+    // Shared/read acquisition; identical to lock() on the Mutex backend.
+    bool lockShared(unsigned long timeoutMs = 0);
+    void unlockShared();
+#endif
+
+#ifdef TIMER_ENABLE_THREADING
+    // Polls hasReachedTarget() on a background thread so callbacks and
+    // repeating restarts fire without the sketch calling into the Timer.
+    bool startMonitor(unsigned long pollIntervalMs = TIMER_MONITOR_INTERVAL_MS);
+    void stopMonitor(unsigned long timeoutMs = 1000);
+    bool isMonitorRunning() const;
+#endif
 
 #ifdef useRTCModule
     void setUseRTC(bool useRTC);

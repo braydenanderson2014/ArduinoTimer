@@ -1,6 +1,24 @@
 #include "SimpleArduinoTimer.h"
 
 // ---------------------------------------------------------------------------
+// Locking helpers
+// ---------------------------------------------------------------------------
+// Both macros compile to nothing unless TIMER_THREAD_SAFE is defined, so the
+// single threaded build behaves exactly as before.  On the Mutex backend the
+// read variant is simply an exclusive lock; on the SimpleRWLock backend it is
+// a shared lock, so concurrent pollers do not serialise on each other.
+#if defined(TIMER_THREAD_SAFE) && defined(TIMER_LOCK_BACKEND_RWLOCK)
+#  define TIMER_READ_LOCK()  SimpleRWLock::ReadGuard _timerLockGuard(_rwLock)
+#  define TIMER_WRITE_LOCK() SimpleRWLock::WriteGuard _timerLockGuard(_rwLock)
+#elif defined(TIMER_THREAD_SAFE)
+#  define TIMER_READ_LOCK()  Mutex::LockGuard _timerLockGuard(_mutex)
+#  define TIMER_WRITE_LOCK() Mutex::LockGuard _timerLockGuard(_mutex)
+#else
+#  define TIMER_READ_LOCK()  ((void)0)
+#  define TIMER_WRITE_LOCK() ((void)0)
+#endif
+
+// ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
 Timer::Timer(bool debug)
@@ -16,17 +34,31 @@ Timer::Timer(bool debug)
     , _timezoneOffsetHours(0)
 #endif
 {
+#ifdef TIMER_ENABLE_THREADING
+    _monitorThread = ThreadManager::InvalidThreadId;
+    _monitorRunning = false;
+    _monitorStopRequested = false;
+    _monitorIntervalMs = TIMER_MONITOR_INTERVAL_MS;
+#endif
     setTimerName("Timer");
+}
+
+Timer::~Timer() {
+#ifdef TIMER_ENABLE_THREADING
+    stopMonitor();
+#endif
 }
 
 // ---------------------------------------------------------------------------
 // Name helpers
 // ---------------------------------------------------------------------------
 void Timer::setTimerName(String timerName) {
+    TIMER_WRITE_LOCK();
     this->TimerName = timerName;
 }
 
 String Timer::getTimerName() const {
+    TIMER_READ_LOCK();
     return TimerName;
 }
 
@@ -46,7 +78,7 @@ bool Timer::_rtcBeginImpl() {
 #endif
 }
 
-// Returns the current RTC time as milliseconds (truncated to unsigned long; wraps on 32-bit targets).
+// Returns the current RTC time as milliseconds since the Unix epoch.
 unsigned long Timer::_rtcNowMs() const {
 #ifdef RTC_CHIP_DS1302
     return (unsigned long)(rtc.GetDateTime().Unix32Time()) * 1000UL;
@@ -94,6 +126,7 @@ TimerDateTime Timer::_rtcNowDateTime() const {
 // Public RTC helpers
 // ---------------------------------------------------------------------------
 void Timer::setUseRTC(bool useRTC) {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Setting useRTC: " + String(useRTC));
     }
@@ -120,18 +153,22 @@ void Timer::setUseRTC(bool useRTC) {
 }
 
 bool Timer::getUseRTC() const {
+    TIMER_READ_LOCK();
     return useRTC;
 }
 
 bool Timer::isRTCAvailable() const {
+    TIMER_READ_LOCK();
     return rtcInitialized;
 }
 
 void Timer::setTimezone(int offsetHours) {
+    TIMER_WRITE_LOCK();
     _timezoneOffsetHours = offsetHours;
 }
 
 void Timer::syncWithRTC() {
+    TIMER_WRITE_LOCK();
     if (!useRTC) {
         if (debug) {
             Serial.println("[" + TimerName + "]: syncWithRTC() ignored - useRTC is false");
@@ -151,6 +188,7 @@ void Timer::syncWithRTC() {
 }
 
 TimerDateTime Timer::getRTCTime() const {
+    TIMER_READ_LOCK();
     if (!rtcInitialized) {
         if (debug) {
             Serial.println("[" + TimerName + "]: getRTCTime() ignored - RTC not initialised");
@@ -172,6 +210,7 @@ TimerDateTime Timer::getRTCTime() const {
 }
 
 String Timer::getRTCTimeString() const {
+    TIMER_READ_LOCK();
     TimerDateTime dt = getRTCTime();
     // Format: "YYYY-MM-DD HH:MM:SS"
     char buf[20];
@@ -182,6 +221,7 @@ String Timer::getRTCTimeString() const {
 }
 
 void Timer::printRTCTime() const {
+    TIMER_READ_LOCK();
     if (!rtcInitialized) {
         if (debug) {
             Serial.println("[" + TimerName + "]: printRTCTime() ignored - RTC not initialised");
@@ -192,6 +232,7 @@ void Timer::printRTCTime() const {
 }
 
 void Timer::setRTCTime(int year, int month, int day, int hour, int minute, int second) {
+    TIMER_WRITE_LOCK();
     if (!rtcInitialized) {
         if (debug) {
             Serial.println("[" + TimerName + "]: setRTCTime() ignored - RTC not initialised");
@@ -209,6 +250,7 @@ void Timer::setRTCTime(int year, int month, int day, int hour, int minute, int s
 // Initialisation
 // ---------------------------------------------------------------------------
 void Timer::begin() {
+    TIMER_WRITE_LOCK();
 #ifdef useRTCModule
     if (!_rtcBeginImpl()) {
         useRTC = false;
@@ -230,6 +272,7 @@ void Timer::begin() {
 // Core timer control
 // ---------------------------------------------------------------------------
 void Timer::start() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Starting timer");
     }
@@ -248,6 +291,7 @@ void Timer::start() {
 }
 
 void Timer::restart() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Restarting timer");
     }
@@ -256,6 +300,7 @@ void Timer::restart() {
 }
 
 void Timer::stop() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Stopping timer");
     }
@@ -273,6 +318,7 @@ void Timer::stop() {
 }
 
 void Timer::reset() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Resetting timer");
     }
@@ -282,6 +328,7 @@ void Timer::reset() {
 }
 
 void Timer::clear() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Clearing timer");
     }
@@ -293,6 +340,7 @@ void Timer::clear() {
 }
 
 void Timer::pause() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Pausing timer");
     }
@@ -318,6 +366,7 @@ void Timer::pause() {
 }
 
 void Timer::resume() {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Resuming timer");
     }
@@ -346,6 +395,7 @@ void Timer::resume() {
 // Target duration setters
 // ---------------------------------------------------------------------------
 void Timer::setTargetDuration(unsigned long durationMs) {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Setting target duration (ms): " + String(durationMs));
     }
@@ -354,6 +404,7 @@ void Timer::setTargetDuration(unsigned long durationMs) {
 }
 
 void Timer::setTargetSeconds(unsigned long seconds) {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Setting target seconds: " + String(seconds));
     }
@@ -362,6 +413,7 @@ void Timer::setTargetSeconds(unsigned long seconds) {
 }
 
 void Timer::setTargetMinutes(unsigned long minutes) {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Setting target minutes: " + String(minutes));
     }
@@ -370,6 +422,7 @@ void Timer::setTargetMinutes(unsigned long minutes) {
 }
 
 void Timer::setTargetHours(unsigned long hours) {
+    TIMER_WRITE_LOCK();
     if (debug) {
         Serial.println("[" + TimerName + "]: Setting target hours: " + String(hours));
     }
@@ -381,18 +434,22 @@ void Timer::setTargetHours(unsigned long hours) {
 // Target duration getters
 // ---------------------------------------------------------------------------
 unsigned long Timer::getTargetDuration() const {
+    TIMER_READ_LOCK();
     return targetDuration;
 }
 
 unsigned long Timer::getTargetSeconds() const {
+    TIMER_READ_LOCK();
     return targetDuration / 1000UL;
 }
 
 unsigned long Timer::getTargetMinutes() const {
+    TIMER_READ_LOCK();
     return targetDuration / 60000UL;
 }
 
 unsigned long Timer::getTargetHours() const {
+    TIMER_READ_LOCK();
     return targetDuration / 3600000UL;
 }
 
@@ -400,6 +457,7 @@ unsigned long Timer::getTargetHours() const {
 // Elapsed / remaining queries
 // ---------------------------------------------------------------------------
 unsigned long Timer::elapsed() {
+    TIMER_READ_LOCK();
     unsigned long e;
     if (isRunning) {
 #ifdef useRTCModule
@@ -422,18 +480,22 @@ unsigned long Timer::elapsed() {
 }
 
 unsigned long Timer::elapsedSeconds() {
+    TIMER_READ_LOCK();
     return elapsed() / 1000UL;
 }
 
 unsigned long Timer::elapsedMinutes() {
+    TIMER_READ_LOCK();
     return elapsed() / 60000UL;
 }
 
 unsigned long Timer::elapsedHours() {
+    TIMER_READ_LOCK();
     return elapsed() / 3600000UL;
 }
 
 unsigned long Timer::lap() {
+    TIMER_WRITE_LOCK();
     unsigned long now;
 #ifdef useRTCModule
     if (useRTC) {
@@ -456,6 +518,7 @@ unsigned long Timer::lap() {
 }
 
 unsigned long Timer::remainingTimeMillis() {
+    TIMER_READ_LOCK();
     unsigned long e = elapsed();
     if (e >= targetDuration) {
         return 0;
@@ -464,6 +527,7 @@ unsigned long Timer::remainingTimeMillis() {
 }
 
 unsigned long Timer::remainingTime() {
+    TIMER_WRITE_LOCK();
     unsigned long remainingMillis = remainingTimeMillis();
 
     if (remainingMillis >= 3600000UL) {
@@ -479,6 +543,7 @@ unsigned long Timer::remainingTime() {
 }
 
 void Timer::updateRemainingTime() {
+    TIMER_WRITE_LOCK();
     unsigned long remainingMillis = remainingTimeMillis();
 
     if (remainingMillis >= 3600000UL) {
@@ -493,6 +558,7 @@ void Timer::updateRemainingTime() {
 }
 
 void Timer::printTimeRemaining() {
+    TIMER_WRITE_LOCK();
     updateRemainingTime(); // refreshes remainingTimeOnTimer (seconds) and timerMode
 
     unsigned long hours   = remainingTimeOnTimer / 3600UL;
@@ -526,14 +592,17 @@ void Timer::printTimeRemaining() {
 // State queries
 // ---------------------------------------------------------------------------
 bool Timer::isTimerRunning() const {
+    TIMER_READ_LOCK();
     return isRunning;
 }
 
 bool Timer::isTimerPaused() const {
+    TIMER_READ_LOCK();
     return isPaused;
 }
 
 bool Timer::hasReachedTarget() {
+    TIMER_WRITE_LOCK();
     if (targetDuration == 0) {
         return false; // No target set; never treat as reached
     }
@@ -553,10 +622,12 @@ bool Timer::hasReachedTarget() {
 // Repeating mode
 // ---------------------------------------------------------------------------
 void Timer::setRepeating(bool repeating) {
+    TIMER_WRITE_LOCK();
     _repeating = repeating;
 }
 
 bool Timer::getRepeating() const {
+    TIMER_READ_LOCK();
     return _repeating;
 }
 
@@ -564,9 +635,133 @@ bool Timer::getRepeating() const {
 // Callback
 // ---------------------------------------------------------------------------
 void Timer::onTargetReached(void (*callback)()) {
+    TIMER_WRITE_LOCK();
     _callback = callback;
 }
 
 bool Timer::checkTimer(unsigned long durationMs) {
+    TIMER_READ_LOCK();
     return elapsed() >= durationMs;
 }
+
+// ---------------------------------------------------------------------------
+// Concurrency support
+// ---------------------------------------------------------------------------
+bool Timer::isThreadSafe() {
+#ifdef TIMER_THREAD_SAFE
+    return true;
+#else
+    return false;
+#endif
+}
+
+#ifdef TIMER_THREAD_SAFE
+bool Timer::lock(unsigned long timeoutMs) {
+#ifdef TIMER_LOCK_BACKEND_RWLOCK
+    return _rwLock.writeLock(timeoutMs);
+#else
+    return _mutex.lock(timeoutMs);
+#endif
+}
+
+void Timer::unlock() {
+#ifdef TIMER_LOCK_BACKEND_RWLOCK
+    _rwLock.writeUnlock();
+#else
+    _mutex.unlock();
+#endif
+}
+
+bool Timer::lockShared(unsigned long timeoutMs) {
+#ifdef TIMER_LOCK_BACKEND_RWLOCK
+    return _rwLock.readLock(timeoutMs);
+#else
+    return _mutex.lock(timeoutMs);
+#endif
+}
+
+void Timer::unlockShared() {
+#ifdef TIMER_LOCK_BACKEND_RWLOCK
+    _rwLock.readUnlock();
+#else
+    _mutex.unlock();
+#endif
+}
+#endif
+
+#ifdef TIMER_ENABLE_THREADING
+void Timer::_monitorEntry(void* argument) {
+    Timer* self = static_cast<Timer*>(argument);
+    if (self != nullptr) {
+        self->_monitorLoop();
+    }
+#if defined(STM_HAS_FREERTOS)
+    vTaskDelete(nullptr);
+#endif
+}
+
+void Timer::_monitorLoop() {
+    while (!_monitorStopRequested) {
+        // hasReachedTarget() fires the callback and handles repeating restarts.
+        hasReachedTarget();
+        ThreadManager::delayThread(static_cast<uint32_t>(_monitorIntervalMs));
+    }
+    _monitorRunning = false;
+}
+
+bool Timer::startMonitor(unsigned long pollIntervalMs) {
+    TIMER_WRITE_LOCK();
+    if (_monitorRunning) {
+        return true;
+    }
+    if (!ThreadManager::hasThreading()) {
+        if (debug) {
+            Serial.println("[" + TimerName + "]: Threading unavailable - monitor not started");
+        }
+        return false;
+    }
+
+    _monitorIntervalMs = (pollIntervalMs == 0) ? 1UL : pollIntervalMs;
+    _monitorStopRequested = false;
+    _monitorRunning = true;
+    _monitorThread = ThreadManager::createThread(
+        &Timer::_monitorEntry,
+        this,
+        "TimerMonitor",
+        TIMER_MONITOR_STACK_SIZE);
+
+    if (_monitorThread == ThreadManager::InvalidThreadId) {
+        _monitorRunning = false;
+        if (debug) {
+            Serial.println("[" + TimerName + "]: Failed to create monitor thread");
+        }
+        return false;
+    }
+    if (debug) {
+        Serial.println("[" + TimerName + "]: Monitor thread started");
+    }
+    return true;
+}
+
+void Timer::stopMonitor(unsigned long timeoutMs) {
+    if (!_monitorRunning) {
+        return;
+    }
+    _monitorStopRequested = true;
+
+    const unsigned long start = millis();
+    while (_monitorRunning && (millis() - start) < timeoutMs) {
+        ThreadManager::delayThread(1);
+    }
+    if (_monitorRunning && _monitorThread != ThreadManager::InvalidThreadId) {
+        ThreadManager::endThread(_monitorThread);
+        _monitorRunning = false;
+    }
+    _monitorThread = ThreadManager::InvalidThreadId;
+}
+
+bool Timer::isMonitorRunning() const {
+    return _monitorRunning;
+}
+#endif // TIMER_ENABLE_THREADING
+
