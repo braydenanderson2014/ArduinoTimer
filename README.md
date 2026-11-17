@@ -3,7 +3,7 @@
 
 <!-- HEALTH_BADGES_START -->
 [![Health: Unsure](https://img.shields.io/badge/Health-Unsure-9e9e9e?style=flat-square)](../../reports/library-health-report.md)
-[![Testing: Failed Testing](https://img.shields.io/badge/Testing-Failed%20Testing-d73a49?style=flat-square)](../../reports/library-health-report.md)
+[![Testing: Tested](https://img.shields.io/badge/Testing-Tested-2ea44f?style=flat-square)](../../reports/library-health-report.md)
 <!-- HEALTH_BADGES_END -->
 
 The `Timer` class is a C++ class for managing time-related operations and timers. It allows you to create, start, stop, reset, and pause timers, making it useful for various timing and scheduling tasks in your Arduino projects.
@@ -163,6 +163,36 @@ myTimer.setTimezone(-5);  // UTC-5 (Eastern Standard Time)
 ```cpp
 myTimer.restart();  // instead of: myTimer.clear(); myTimer.start();
 ```
+
+### UnoQ bridge support
+
+If the UnoQ App Lab bridge is enabled, you can register a Timer instance so Python can call it over `Bridge.call()`:
+
+```cpp
+#define TIMER_USE_BRIDGE
+#include "SimpleArduinoTimer.h"
+
+Timer myTimer;
+
+void setup() {
+    myTimer.setTargetSeconds(5);
+    myTimer.beginBridge();  // registers timer_start, timer_stop, timer_set_target_seconds, ...
+}
+```
+
+From Python, the sketch exposes methods such as:
+
+```python
+Bridge.call("timer_start")
+Bridge.call("timer_set_target_seconds", 5)
+Bridge.call("timer_pause")
+Bridge.call("timer_resume")
+Bridge.call("timer_elapsed_ms")
+Bridge.call("timer_remaining_ms")
+Bridge.call("timer_has_reached_target")
+```
+
+The default prefix is `timer`, but you can use a custom prefix with `myTimer.beginBridge("my_timer")` and then call `Bridge.call("my_timer_start", ...)`.
 
 ### setRepeating(bool) — auto-restart mode
 
